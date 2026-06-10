@@ -71,8 +71,20 @@ jobs:
           for so in $(cat /tmp/libs_uniq.txt); do
             cp -L "$so" /opt/pcache/lib/ 2>/dev/null || true
           done
+          # Remove glibc fundamentals — these MUST come from the target system,
+          # not the bundle. Mismatched libc/loader → SIGFPE on any system binary
+          # (mkdir, cp, etc.) when LD_LIBRARY_PATH is set.
+          cd /opt/pcache/lib
+          for pat in 'libc.so*' 'libm.so*' 'libpthread.so*' 'libdl.so*' \
+                     'libnsl.so*' 'libresolv.so*' 'libgcc_s.so*' 'libstdc++.so*' \
+                     'ld-linux*' 'libutil.so*' 'librt.so*' 'libcrypt.so*' \
+                     'libpthread-*' 'libc-*' 'libdl-*' 'libm-*' 'libresolv-*' \
+                     'libBrokenLocale.so*' 'libanl.so*' 'libmemusage.so*' \
+                     'libthread_db.so*'; do
+            rm -f $pat 2>/dev/null || true
+          done
           ls /opt/pcache/lib | head -20
-          echo "lib count: $(ls /opt/pcache/lib | wc -l)"
+          echo "lib count (post-filter): $(ls /opt/pcache/lib | wc -l)"
 
       - name: Copy fonts & X11 data
         run: |
