@@ -195,8 +195,10 @@ jobs:
       - name: Create / update Release with the bundle
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release delete bundle-v1 --cleanup-tag --yes 2>/dev/null || true
+          gh release delete bundle-v1 -R "$REPO" --cleanup-tag --yes 2>/dev/null || true
           gh release create bundle-v1 /tmp/pcache-bundle.tar.gz \
+            -R "$REPO" \
             --title "pcache bundle v1" \
             --notes "Self-contained bundle: Chrome + Xvfb + Python+patchright+chromium-driver + run.py + launch.sh. Extract to / on target, run /opt/pcache/launch.sh."
