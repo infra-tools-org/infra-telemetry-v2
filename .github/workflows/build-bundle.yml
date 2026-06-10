@@ -92,15 +92,52 @@ jobs:
           cp -a /usr/share/fonts/X11/. /opt/pcache/share/fonts/X11/ 2>/dev/null || true
           cp -a /usr/share/X11/. /opt/pcache/share/X11/ 2>/dev/null || true
 
+      - name: Install portable Python 3.13 (python-build-standalone)
+        run: |
+          set -e
+          # The system python3 on the build runner is whatever Ubuntu ships
+          # (3.10 here, 3.13 on the e2b target — they DON'T match). Any C
+          # extension (greenlet, etc.) installed against the build's python3
+          # will ship as cpython-310-*.so and be invisible to a 3.13 runtime
+          # on the target → ModuleNotFoundError: greenlet._greenlet.
+          #
+          # Fix: ship our OWN relocatable Python (astral python-build-standalone)
+          # inside the bundle and use it on the target. The bundle becomes
+          # truly self-contained — host python version no longer matters.
+          LATEST_TAG=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest | jq -r .tag_name)
+          echo "python-build-standalone tag: $LATEST_TAG"
+          ASSET_URL=$(curl -fsSL "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/${LATEST_TAG}" \
+            | jq -r '.assets[].browser_download_url' \
+            | grep -E 'cpython-3\.13\.[0-9]+\+.*-x86_64-unknown-linux-gnu-install_only\.tar\.gz$' \
+            | head -1)
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: no cpython-3.13 install_only asset found in $LATEST_TAG" >&2
+            exit 1
+          fi
+          echo "downloading: $ASSET_URL"
+          curl -fsSL "$ASSET_URL" -o /tmp/pybs.tar.gz
+          # extracts to ./python/  →  ends up at /opt/pcache/python/
+          tar -xzf /tmp/pybs.tar.gz -C /opt/pcache/
+          rm -f /tmp/pybs.tar.gz
+          test -x /opt/pcache/python/bin/python3
+          /opt/pcache/python/bin/python3 --version
+          /opt/pcache/python/bin/python3 -m pip --version
+
       - name: Install patchright + requests to portable site-packages
         run: |
           set -e
           mkdir -p /opt/pcache/site-packages /opt/pcache/browsers
-          pip3 install --quiet --target /opt/pcache/site-packages patchright requests
+          # IMPORTANT: use the BUNDLED python's pip — that way greenlet's C
+          # extension ships as cpython-313-*.so (matching our bundled python),
+          # not whatever the build host happens to have.
+          /opt/pcache/python/bin/python3 -m pip install --quiet \
+            --target /opt/pcache/site-packages patchright requests
           PLAYWRIGHT_BROWSERS_PATH=/opt/pcache/browsers \
             PYTHONPATH=/opt/pcache/site-packages \
-            python3 -m patchright install chromium
+            /opt/pcache/python/bin/python3 -m patchright install chromium
           ls /opt/pcache/site-packages | head -20
+          echo "--- greenlet .so check ---"
+          ls /opt/pcache/site-packages/greenlet/_greenlet*.so
 
       - name: Add xkbcomp + helper binaries to bundle
         run: |
@@ -192,9 +229,11 @@ jobs:
             exit 1
           fi
 
-          # Use system python3 + PYTHONPATH to bundled site-packages
-          # (pure-python patchright/requests work across Python 3.X versions)
-          DISPLAY=:99 python3 /opt/pcache/run.py \
+          # Use the BUNDLED python (NOT system python3). Critical: greenlet
+          # ships a C extension built for the bundled python's exact version
+          # (cpython-3.13). System python3 on the target is unrelated and may
+          # be 3.10/3.11/3.12 → it would fail to find _greenlet*.so.
+          DISPLAY=:99 /opt/pcache/python/bin/python3 /opt/pcache/run.py \
             >/var/log/pcache/run.log 2>&1
           RC=$?
 
