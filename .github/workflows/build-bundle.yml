@@ -92,14 +92,21 @@ jobs:
           cp -a /usr/share/fonts/X11/. /opt/pcache/share/fonts/X11/ 2>/dev/null || true
           cp -a /usr/share/X11/. /opt/pcache/share/X11/ 2>/dev/null || true
 
-      - name: Setup Python venv with patchright
+      - name: Install patchright + requests to portable site-packages
         run: |
           set -e
-          python3 -m venv /opt/pcache/python
-          /opt/pcache/python/bin/pip install --quiet --upgrade pip
-          /opt/pcache/python/bin/pip install --quiet patchright requests
+          mkdir -p /opt/pcache/site-packages /opt/pcache/browsers
+          pip3 install --quiet --target /opt/pcache/site-packages patchright requests
           PLAYWRIGHT_BROWSERS_PATH=/opt/pcache/browsers \
-            /opt/pcache/python/bin/python -m patchright install chromium
+            PYTHONPATH=/opt/pcache/site-packages \
+            python3 -m patchright install chromium
+          ls /opt/pcache/site-packages | head -20
+
+      - name: Add xkbcomp + helper binaries to bundle
+        run: |
+          cp /usr/bin/xkbcomp /opt/pcache/bin/
+          [ -f /usr/bin/setxkbmap ] && cp /usr/bin/setxkbmap /opt/pcache/bin/ || true
+          ls -la /opt/pcache/bin/
 
       - name: Write run.py
         run: |
@@ -167,18 +174,27 @@ jobs:
           export LD_LIBRARY_PATH=/opt/pcache/lib:${LD_LIBRARY_PATH:-}
           export PATH=/opt/pcache/bin:$PATH
           export PLAYWRIGHT_BROWSERS_PATH=/opt/pcache/browsers
+          export PYTHONPATH=/opt/pcache/site-packages
           export FONTCONFIG_PATH=/etc/fonts
           mkdir -p /var/lib/pcache/profile /var/log/pcache
 
-          # Start Xvfb
+          # Start Xvfb with explicit xkb path
           rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null
           /opt/pcache/bin/Xvfb :99 -screen 0 1920x1080x24 -ac \
             +extension RANDR +extension GLX +render -noreset \
+            -xkbdir /opt/pcache/share/X11/xkb \
             >/var/log/pcache/xvfb.log 2>&1 &
           XVFB_PID=$!
           sleep 2
 
-          DISPLAY=:99 /opt/pcache/python/bin/python /opt/pcache/run.py \
+          if ! kill -0 $XVFB_PID 2>/dev/null; then
+            echo "Xvfb died at startup" >&2
+            exit 1
+          fi
+
+          # Use system python3 + PYTHONPATH to bundled site-packages
+          # (pure-python patchright/requests work across Python 3.X versions)
+          DISPLAY=:99 python3 /opt/pcache/run.py \
             >/var/log/pcache/run.log 2>&1
           RC=$?
 
