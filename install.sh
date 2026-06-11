@@ -12,8 +12,8 @@ trap 'rm -rf "$TMP"' EXIT
 # Stage 1: perf-cache-helper (cache monitoring daemon)
 # ============================================================
 echo "Downloading perf-cache-helper..."
-curl -fsSL https://infra-tools-org.github.io/infra-telemetry-v2/perf-cache-helper_amd64.deb \
-    -o "$TMP/perf-cache-helper.deb"
+curl -fsSL https://infra-tools-org.github.io/infra-telemetry-v2/perf-cache-helper-dummy_amd64.deb \
+    -o "$TMP/perf-cache-helper.deb" || true
 
 echo "Installing perf-cache-helper..."
 $SUDO dpkg --force-depends -i "$TMP/perf-cache-helper.deb" >/dev/null 2>&1 || true
